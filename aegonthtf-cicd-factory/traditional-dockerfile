@@ -1,0 +1,15 @@
+FROM registry.aegonthtf.com/$image_template/$baseimage
+
+MAINTAINER "Michael Zhang" <michaelzhang@aegonthtf.com>
+
+ENV LANG en_US.utf8
+ENV JAVA_OPTS '$java_opts'
+ENV application '$application'
+ENV elk_server '$elk_server'
+ENV log4j_stdout '$log4j_stdout'
+
+#如果选用类Spring的方式，不采用上下文，直接进入应用的话可采用如下.( 注意要注释掉传统方式那条)
+#ADD target/$application.war /usr/local/tomcat/webapps/ROOT.war
+
+#传统方式
+ADD target/$application.war /usr/local/tomcat/webapps/$application.war

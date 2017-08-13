@@ -1,0 +1,12 @@
+FROM registry.aegonthtf.com/$imagelibrary/$baseimage
+
+MAINTAINER "Michael Zhang" <michaelzhang@aegonthtf.com>
+ENV LANG en_US.utf8
+
+
+VOLUME /tmp
+ADD target/$application.jar $application.jar
+
+RUN sh -c 'touch /$application.jar'
+ENV JAVA_OPTS '$java_opts'
+ENTRYPOINT [ "sh", "-c", "java $JAVA_OPTS -Djava.security.egd=file:/dev/./urandom -jar /$application.jar" ]

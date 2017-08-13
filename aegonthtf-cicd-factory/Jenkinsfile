@@ -1,0 +1,296 @@
+pipeline {
+    agent any;
+   
+    parameters {
+        string(name: 'BRANCH', defaultValue: 'master', description: '请输入待部署的分支或标签')
+        //booleanParam(name: 'DEBUG_BUILD', defaultValue: true, description: '') 
+    }
+    //triggers { cron('H 4/* 0 0 1-5') }
+   
+    environment {
+
+        //请输入待部署的应用名称
+        application_name = 'appName'   
+
+        //请输入待编译部署的应用的SCM地址 git or svn 。
+        //如果在git上，只有应用存放不符合规范才需要在此处修改，一般优先选择让应用更改源码位置以符合规范        
+        //如果是SVN，此处需要输入全路径。（后续看情况，界面输入tag号之后，此处按规范拼出正确地址        
+        scm_url = "http://gitlab.aegonthtf.com/research/${env.application_name}.git"
+
+        //请输入待部署的分支名称,此处一般不做修改。 按界面上的输入的分支来发布。        
+        branch = ${params.BRANCH}
+        
+                        
+        //请输入计划部署的节点数        
+        replicas = 2                    
+
+        
+        //请输入部署包的类型   traditional or  spring-boot
+
+        deploy_type='traditional'
+        
+        //输入JAVA_OPTS, 可以为空，根据实际需要输入
+        java_opts = '-server -Dfile.encoding=UTF-8 -Duser.timezone=Asia/Shanghai'
+
+        //输入中间件基础镜像的名称
+        //traditional部署类型选择合适的Tomcat基础镜像. spring boot部署类型使用Java基础镜像
+        
+        baseimage = 'tomcat:8.0-oracle-jre8'        
+        
+        //该应用是否向集群外暴露服务？
+        //本处采用Ingress方式向集群外暴露服务。对应的DNS 域名增加以及高可用反向代理Nginx配置需手动处理。        
+        expose_service = 'false'
+        
+        //暴露服务的域名
+        domain_name = 'domainName.aegonthtf.com'
+        
+        //暴露服务的路径   如果是根目录为 / 如果有上下文，则按照/contextPath/格式输入
+        context_path = '/'      
+        
+        ////////////////////////////////////////////////////////////////////////////////////////////////////
+        //应用健康生存探针路径liveness readiness probe path
+        //此处要特别注意，要确保该地址是可以访问的，且不是用户登录验证的界面，否则会发现容器不能提供服务，不断重启
+        //推荐Spring Boot框架类应用增加Actuator引用，或自定义/health探针
+        ////////////////////////////////////////////////////////////////////////////////////////////////////
+        probe_path =  "${env.context_path}" + 'health'
+            
+        
+        ////////////////////////////////////////////////////////////////////////////////////////////////////
+        // 下一节中为特别配置，为容器增加数据源、持久存储///////////////////////////////////////////////////
+        ////////////////////////////////////////////////////////////////////////////////////////////////////
+        
+        
+        //输入传入中间件镜像运行实例的环境变量ConfigMap的名称--ConfigMap在k8s中设置的，请登录k8s控制台查看
+        configmap = 'default-tomcat-config'
+        
+        //该应用是否使用存储  目前仅支持NAS, 未来将支持Ceph
+        storage = 'false'   
+        
+        ////////////////////////////////////////////////////////////////////////////////////////////////////
+      
+        
+        ////////////////////////////////////////////////////////////////////////////////////////////////////
+        // 下一节中为基础环境配置，一个环境中配置完成后，单个应用使用基本不需要变化
+        ////////////////////////////////////////////////////////////////////////////////////////////////////
+        //请输入模板镜像库的名称
+        image_template = 'template-dev'
+
+        //请输入目标镜像库的名称
+        image_library = 'aegonthtf-research'
+        
+        //请输入日志平台的地址
+        elk_server = 'logcenter-dev.aegonthtf.com'
+        
+        //设置日志的输出指向,如果想把日志输出到本地请注释此选项
+        log4j_stdout = 'ELK'
+        
+
+
+        //输入k8s集群选择--注意，环境切换，如生产、测试、阿里云，需要更改下面k8s-deploy中的targetClusters那部分代码。 
+        //不涉及环境切换，则不需要更改
+        // options:  onlyPrimaryCluster   onlyBackupCluster  allCluster
+        
+        targetK8sCluster = 'allCluster' 
+
+        //容器镜像仓库地址
+        docker_registry = 'https://registry.aegonthtf.com/'
+        
+        //容器服务器地址（容器工厂地址）
+        docker_server = 'tcp://10.72.241.179:2376'
+        
+        //容器Dockerfile地址
+        dockerfile_loc_url ='http://gitlab.aegonthtf.com/research/aegonthtf-cicd-factory.git'
+        
+        //容器Dockerfile分支，一般应该也是应用的名称
+        dockerfile_branch = "${env.application_name}"
+        
+        
+        //Ingress Yaml file scm url （URL中需要输入gitlab的用户密码）
+        //特别注意： 切换环境时，此处要更改，同时要修改k8s-deploy.sh中的对应文件夹字段，比如k8s-dev-ingress修改为k8s-prod-ingress
+        ingress_scm_url = "http://michaelzhang:Aegon2015@gitlab.aegonthtf.com/aegonthtf-config-center/k8s-dev-ingress.git"
+    
+        //生成docker tag (取自系统变量build number）
+        docker_tag = "${BUILD_NUMBER}"
+    }
+
+    stages {                    
+
+           stage('clean work space'){
+            steps{
+                   cleanWs()
+                }
+           }
+
+           //获取代码
+           //支持从SVN和Gitlab上获取代码
+           //Git 要输入分支标志   SVN输入绝对路径 
+           //信息在该文件头部的设置部分录入
+           
+           stage('Check Out Code') {
+               steps {
+                     // source code is on git platform
+                     checkout([$class: 'GitSCM', branches: [[name: "*/${env.branch}"]], doGenerateSubmoduleConfigurations: false, extensions: [], submoduleCfg: [], userRemoteConfigs: [[credentialsId: 'gitlab-user', url: env.scm_url]]])                     
+                     // source code is on svn platform
+                     //checkout([$class: 'SubversionSCM', additionalCredentials: [], excludedCommitMessages: '', excludedRegions: '', excludedRevprop: '', excludedUsers: '', filterChangelog: false, ignoreDirPropChanges: false, includedRegions: '', locations: [[credentialsId: 'sourceadmin', depthOption: 'infinity', ignoreExternalsOption: true, local: '.', remote: env.scm_url]], workspaceUpdater: [$class: 'UpdateUpdater']])                      
+                }
+
+           }
+           
+           //代码质量检查
+           //可选步骤，有的项目通不过，可注释掉。 （视推广进度再做强制要求）
+           stage('Sonarqube Scan') {
+               steps {
+                      withSonarQubeEnv('sonarqube') {
+                         sh 'mvn org.sonarsource.scanner.maven:sonar-maven-plugin:3.2:sonar'
+                      }
+                      //检查代码质量，如果不符合设定的门槛，则不能通过，退出Pipeline, 不支持发布
+                      script{
+                          timeout(time: 3, unit: 'MINUTES') { // Just in case something goes wrong, pipeline will be killed after a timeout
+                              def qg = waitForQualityGate() // Reuse taskId previously collected by withSonarQubeEnv
+                              if (qg.status != 'OK') {
+                                 error "Pipeline aborted due to quality gate failure: ${qg.status}"
+                              }
+                          }  
+                      }                      
+               }
+           }
+
+           //编译打包
+           //必须使用Maven，依赖项必须使用私有仓库
+           stage('Compile&Package') {
+               steps {
+                   sh 'mvn package'
+               }
+           }          
+
+           //单元测试，目前为空，待以后看开发实践而定是否增加
+           stage('Unit Test') {
+               steps {
+                   echo 'unit test' 
+               }
+           }          
+           
+           // 生成容器镜像，并保存到镜像仓库中
+           // 此处注意，使用了特别的Tomcat基础镜像，以实现数据源的定义，未来包括JVM参数等，均可以按照此方法实现自定义
+           // 具体说明见另外的文章
+           stage('Generate Docker Image') {
+          
+               steps {  
+                 
+                    dir('docker'){
+                       checkout([$class: 'GitSCM', branches: [[name: "*/${env.dockerfile_branch}"]], doGenerateSubmoduleConfigurations: false, extensions: [], submoduleCfg: [], userRemoteConfigs: [[credentialsId: 'gitlab-user', url: env.dockerfile_loc_url]]])
+                    }
+
+                    sh 'sed -i \'s@$application@\'\"'+env.application_name+'\"\'@g\' docker/'+env.deploy_type+'-dockerfile'
+                    sh 'sed -i \'s@$image_template@\'\"'+env.image_template+'\"\'@g\' docker/'+env.deploy_type+'-dockerfile'
+                    sh 'sed -i \'s@$log4j_stdout@\'\"'+env.log4j_stdout+'\"\'@g\' docker/'+env.deploy_type+'-dockerfile'
+                    sh 'sed -i \'s@$elk_server@\'\"'+env.elk_server+'\"\'@g\' docker/'+env.deploy_type+'-dockerfile'
+                    sh 'sed -i \'s@$imagelibrary@\'\"'+env.image_library+'\"\'@g\' docker/'+env.deploy_type+'-dockerfile'
+                    sh 'sed -i \'s@$baseimage@\'\"'+env.baseimage+'\"\'@g\' docker/'+env.deploy_type+'-dockerfile'
+                    sh 'sed -i \'s@$java_opts@\'\"'+env.java_opts+'\"\'@g\' docker/'+env.deploy_type+'-dockerfile'
+
+                    script {
+                      docker.withRegistry(env.docker_registry,'registry-user'){
+                          docker.withServer(env.docker_server) {
+                             docker.build(env.image_library+'/'+env.application_name,'-f docker/'+env.deploy_type+'-dockerfile .').push(env.docker_tag)
+                          }                                
+                      }
+                    }
+               }
+            
+           }        
+
+           // 在k8s平台上实现部署
+           // 并行部署到主备集群     
+           // 根据参数：
+           //         自动实现持久存储的挂载（目前实现NAS的挂载，未来也可以实现Ceph的挂载）
+           //         自动创建Ingress, 实现服务的暴露 （如果是内部服务，不需要暴露服务的，也可以选择不暴露该服务）
+           
+
+           stage('K8s Deploy') {
+
+               steps{
+                   script{
+                      def targetClusters
+                      def branches = [:]
+                      
+                      if (env.targetK8sCluster == 'allCluster'){
+                         targetClusters= ["k8s-dev-primary","k8s-dev-backup"]
+                      }
+                      else if (env.targetK8sCluster == 'onlyPrimaryCluster'){
+                         targetClusters= ["k8s-dev-primary"]
+                      }
+                      else if (env.targetK8sCluster == 'onlyBackupCluster'){
+                         targetClusters= ["k8s-dev-backup"]
+                      }                      
+                      
+                      dir('docker'){
+                         sh 'git clone '+env.ingress_scm_url
+                      }
+                      
+                      for (int i = 0; i <  targetClusters.size(); i++) {
+                          def index = i // fresh variable per iteration; i will be mutated
+                          branches[targetClusters.get(index)] = {
+                            dir('docker'){
+                               sh 'chmod +x k8s-deploy.sh'                      
+                               sh './k8s-deploy.sh ${image_library} ${application_name} ${replicas} ${configmap} ${storage} ${expose_service} ${domain_name} ${context_path} ${docker_tag} ${probe_path} '+targetClusters.get(index)+' ${ingress_scm_url} '
+                            }     
+                          }
+                      }                  
+                      branches.failFast = true
+                      parallel  branches  
+                      
+                      
+                      dir('docker/k8s-dev-ingress'){
+                         sh 'pwd && git add . && if git status | grep nothing > /dev/null; then echo \'no change\'; else git commit -m \'update ingress yaml\' && git push origin master; fi '
+                      }                      
+                      
+                    }
+               }
+           }
+
+
+ 
+
+
+           // 通知
+           // 实际实现是在post一节中，此处为占位符。展示流程环节。 
+           stage('Notify & Over') {
+
+               steps{
+                   echo 'notify'
+               }
+           }           
+
+
+         
+
+    }
+    post {
+        //always {
+        //    echo 'This will always run'
+        //}
+        success {
+                emailext (
+                       subject: "Jenkins Job Success: Job '${env.JOB_NAME} [${env.BUILD_NUMBER}]'",
+                       body: """<p>Success: Job '${env.JOB_NAME} [${env.BUILD_NUMBER}]':</p>  <p>You Can check console output at &QUOT;<a href='${env.BUILD_URL}'>${env.JOB_NAME} [${env.BUILD_NUMBER}]</a>&QUOT;</p>""",
+                       recipientProviders: [[$class: 'DevelopersRecipientProvider'],[$class: 'RequesterRecipientProvider'], [$class: 'UpstreamComitterRecipientProvider'], [$class: 'FailingTestSuspectsRecipientProvider'], [$class: 'FirstFailingBuildSuspectsRecipientProvider']] 
+                )
+        }
+        failure {
+                emailext (
+                       subject: "FAILED: Job '${env.JOB_NAME} [${env.BUILD_NUMBER}]'",
+                       body: """<p>FAILED: Job '${env.JOB_NAME} [${env.BUILD_NUMBER}]':</p>  <p>Check console output at &QUOT;<a href='${env.BUILD_URL}'>${env.JOB_NAME} [${env.BUILD_NUMBER}]</a>&QUOT;</p>""",
+                       recipientProviders: [[$class: 'DevelopersRecipientProvider'],[$class: 'RequesterRecipientProvider'], [$class: 'UpstreamComitterRecipientProvider'], [$class: 'FailingTestSuspectsRecipientProvider'], [$class: 'FirstFailingBuildSuspectsRecipientProvider']] 
+                )
+        }
+        unstable {
+            echo 'This will run only if the run was marked as unstable'
+        }
+        //changed {
+        //    echo 'This will run only if the state of the Pipeline has changed'
+        //    echo 'For example, if the Pipeline was previously failing but is now successful'
+        //}
+    }    
+
+}

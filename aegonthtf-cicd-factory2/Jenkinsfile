@@ -1,0 +1,226 @@
+pipeline {
+    agent any;
+   
+    parameters {
+        string(name: 'BRANCH', defaultValue: 'master', description: '请输入待部署的分支或标签')
+        //booleanParam(name: 'DEBUG_BUILD', defaultValue: true, description: '') 
+    }
+    //triggers { cron('H 4/* 0 0 1-5') }
+   
+    environment {
+        //请输入待部署的应用名称
+        application_name = 'appName'   
+
+        //请输入待编译部署的应用的SCM地址 git or svn 。
+        //如果在git上，只有应用存放不符合规范才需要在此处修改，一般优先选择让应用更改源码位置以符合规范        
+        //如果是SVN，此处需要输入全路径。（后续看情况，界面输入tag号之后，此处按规范拼出正确地址        
+        scm_url = "http://gitlab.aegonthtf.com/research/${env.application_name}.git"
+
+        //请输入待部署的分支名称,此处一般不做修改。 按界面上的输入的分支来发布。        
+        branch = ${params.BRANCH}
+        
+                        
+        //请输入计划部署的节点数        
+        replicas = 2                    
+                    
+        //该应用是否向集群外暴露服务？本处采用Ingress方式向集群外暴露服务。对应的DNS 域名增加以及高可用反向代理Nginx配置需手动处理。
+        expose_service = 'true'
+        
+        //暴露服务的域名,e.g domainName.aegonthtf.com        
+        domain_name = 'domainName.aegonthtf.com'
+        
+        //暴露服务的路径   如果是根目录为 / 如果有上下文，则按照/contextPath/格式输入
+        context_path = '/'
+        
+        
+        //反向代理的服务名，此处仅支持一个到一个服务器的转发，使用场景为到一个K8s Service的转发，填入svc的名称和端口 如  http://svc-demo-app:8080
+        //如果是后台服务无单一服务入口，则需要手动配置nginx.conf文件
+        //如果单纯是静态文件发布的，也需要手动配置nginx.conf文件，删除反向代理的相关设置
+        
+        backend_addr = 'http://svc-demo-app:8080'
+        
+        //输入k8s集群选择--注意，环境切换，如生产、测试、阿里云，需要更改下面k8s-deploy中的targetClusters那部分代码。 
+        //不涉及环境切换，则不需要更改
+        // options:  onlyPrimaryCluster   onlyBackupCluster  allCluster
+        
+        targetK8sCluster = 'allCluster' 
+        
+        
+        ////////////////////////////////////////////////////////////////////////////////////////////////////
+        //应用健康生存探针路径liveness readiness probe path
+        //此处要特别注意，要确保该地址是可以访问的，且不是用户登录验证的界面，否则会发现容器不能提供服务，不断重启
+        ////////////////////////////////////////////////////////////////////////////////////////////////////
+        probe_path =  "${env.context_path}"        
+          
+
+        
+        ////////////////////////////////////////////////////////////////////////////////////////////////////
+        // 下一节中为基础环境配置，一个环境中配置完成后，单个应用使用基本不需要变化
+        ////////////////////////////////////////////////////////////////////////////////////////////////////
+
+        //请输入基础(模板)镜像库的名称
+        base_image_library = 'aegonthtf-research'
+
+        //请输入生成的产品存放镜像库的名称
+        product_image_library = 'aegonthtf-research'
+
+        //容器镜像仓库地址
+        docker_registry = 'https://registry.aegonthtf.com/'
+        
+        //容器服务器地址（容器工厂地址）
+        docker_server = 'tcp://10.72.241.179:2376'
+        
+        //容器Dockerfile地址
+        dockerfile_loc_url ='http://gitlab.aegonthtf.com/research/aegonthtf-cicd-factory2.git'
+        
+        //容器Dockerfile分支，一般应该也是应用的名称
+        dockerfile_branch = "${env.application_name}"
+        
+        
+        //Ingress Yaml file scm url
+        ingress_scm_url = "http://gitlab.aegonthtf.com/aegonthtf-config-center/k8s-dev-ingress.git"
+        
+        
+        //生成docker tag (取自系统变量build number）        
+        docker_tag = "${BUILD_NUMBER}"
+
+    }
+
+    stages {                    
+
+           stage('clean work space'){
+            steps{
+                  echo env.docker_tag
+                  cleanWs()
+                }
+           }
+
+           //获取代码
+           //支持从SVN和Gitlab上获取代码
+           //Git 要输入分支标志   SVN输入绝对路径 
+           //信息在该文件头部的设置部分录入
+           
+           stage('Check Out Code') {
+               steps {
+                    dir('static-html-directory'){
+                        // source code is on git platform
+                        checkout([$class: 'GitSCM', branches: [[name: "*/${env.branch}"]], doGenerateSubmoduleConfigurations: false, extensions: [], submoduleCfg: [], userRemoteConfigs: [[credentialsId: 'gitlab-user', url: env.scm_url]]])                     
+                        // source code is on svn platform
+                        //checkout([$class: 'SubversionSCM', additionalCredentials: [], excludedCommitMessages: '', excludedRegions: '', excludedRevprop: '', excludedUsers: '', filterChangelog: false, ignoreDirPropChanges: false, includedRegions: '', locations: [[credentialsId: 'sourceadmin', depthOption: 'infinity', ignoreExternalsOption: true, local: '.', remote: env.scm_url]], workspaceUpdater: [$class: 'UpdateUpdater']])                      
+                    }
+                     
+
+                }
+
+           }
+           
+          // 生成容器镜像，并保存到镜像仓库中
+
+           stage('Generate Docker Image') {
+          
+               steps {  
+                 
+                    dir('docker'){
+                       checkout([$class: 'GitSCM', branches: [[name: "*/${env.dockerfile_branch}"]], doGenerateSubmoduleConfigurations: false, extensions: [], submoduleCfg: [], userRemoteConfigs: [[credentialsId: 'gitlab-user', url: env.dockerfile_loc_url]]])
+                       sh 'sed -i "s#@base_image_library@#'+ env.base_image_library + '#g" Dockerfile' 
+                       sh 'sed -i "s#@context_path@#'+ env.context_path + '#g" Dockerfile' 
+                       sh 'sed -i "s#@backend_addr@#'+ env.backend_addr + '#g" nginx.conf'                        
+                    }
+
+                    script {
+                      docker.withRegistry(env.docker_registry,'registry-user'){
+                          docker.withServer(env.docker_server) {
+                              echo env.prodct_image_library
+                              docker.build(env.product_image_library + '/' + env.application_name,'-f docker/Dockerfile .').push(env.docker_tag)
+                          }                                
+                      }
+                    }
+               }
+            
+           }        
+
+
+           // 根据参数在k8s平台上实现部署
+           // 根据参数：
+           //     自动创建Ingress, 实现服务的暴露 （如果是内部服务，不需要暴露服务的，也可以选择不暴露该服务）
+           
+
+           stage('K8s Deploy') {
+
+               steps{
+                   script{
+                      def targetClusters
+                      def branches = [:]
+                      
+                      if (env.targetK8sCluster == 'allCluster'){
+                         targetClusters= ["k8s-dev-primary","k8s-dev-backup"]
+                      }
+                      else if (env.targetK8sCluster == 'onlyPrimaryCluster'){
+                         targetClusters= ["k8s-dev-primary"]
+                      }
+                      else if (env.targetK8sCluster == 'onlyBackupCluster'){
+                         targetClusters= ["k8s-dev-backup"]
+                      }                      
+                      
+                      dir('docker'){
+                         sh 'git clone '+env.ingress_scm_url
+                      }
+                      
+                      for (int i = 0; i <  targetClusters.size(); i++) {
+                          def index = i // fresh variable per iteration; i will be mutated
+                          branches[targetClusters.get(index)] = {
+                            dir('docker'){
+                               sh 'chmod +x k8s-nginx-deploy.sh'                      
+                               sh './k8s-nginx-deploy.sh ${product_image_library} ${application_name} ${replicas} ${expose_service} ${domain_name} ${context_path} ${docker_tag} ${probe_path} '+ targetClusters.get(index) 
+                            }     
+                          }
+                      }                  
+                      branches.failFast = true
+                      parallel  branches  
+                      
+                      
+                      dir('docker/k8s-dev-ingress'){
+                         sh 'pwd && git add . && if git status | grep nothing > /dev/null; then echo \'no change\'; else git commit -m \'update ingress yaml\' && git push origin master; fi '
+                      }                      
+                      
+                    }
+               }
+           }   
+
+           // 通知
+           // 实际实现是在post一节中，此处为占位符。展示流程环节。 
+           stage('Notify & Over') {
+               steps{                                
+                   echo 'notify'                 
+               }
+           }          
+
+    }
+    post {
+        //always {
+        //    echo 'This will always run'
+        //}
+        success {
+                emailext (
+                       subject: "Jenkins Job Success: Job '${env.JOB_NAME} [${env.BUILD_NUMBER}]'",
+                       body: """<p>Success: Job '${env.JOB_NAME} [${env.BUILD_NUMBER}]':</p>  <p>You Can check console output at &QUOT;<a href='${env.BUILD_URL}'>${env.JOB_NAME} [${env.BUILD_NUMBER}]</a>&QUOT;</p>""",
+                       recipientProviders: [[$class: 'DevelopersRecipientProvider'],[$class: 'RequesterRecipientProvider'], [$class: 'UpstreamComitterRecipientProvider'], [$class: 'FailingTestSuspectsRecipientProvider'], [$class: 'FirstFailingBuildSuspectsRecipientProvider']] 
+                )
+        }
+        failure {
+                emailext (
+                       subject: "FAILED: Job '${env.JOB_NAME} [${env.BUILD_NUMBER}]'",
+                       body: """<p>FAILED: Job '${env.JOB_NAME} [${env.BUILD_NUMBER}]':</p>  <p>Check console output at &QUOT;<a href='${env.BUILD_URL}'>${env.JOB_NAME} [${env.BUILD_NUMBER}]</a>&QUOT;</p>""",
+                       recipientProviders: [[$class: 'DevelopersRecipientProvider'],[$class: 'RequesterRecipientProvider'], [$class: 'UpstreamComitterRecipientProvider'], [$class: 'FailingTestSuspectsRecipientProvider'], [$class: 'FirstFailingBuildSuspectsRecipientProvider']] 
+                )
+        }
+        unstable {
+            echo 'This will run only if the run was marked as unstable'
+        }
+        //changed {
+        //    echo 'This will run only if the state of the Pipeline has changed'
+        //    echo 'For example, if the Pipeline was previously failing but is now successful'
+        //}
+    }    
+
+}
